@@ -18,6 +18,7 @@ import asyncio
 import json
 import time
 import sys
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +27,12 @@ import websockets
 
 from config import HELIUS_API_KEY, BOT_TOKEN, CHAT_ID, MIN_SOL, SOL_PRICE_SOURCE
 
+
+HELIUS_API_KEY = os.environ["HELIUS_API_KEY"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+CHAT_ID = os.environ["CHAT_ID"]
+MIN_SOL = float(os.environ.get("MIN_SOL", "0.1"))
+SOL_PRICE_SOURCE = os.environ.get("SOL_PRICE_SOURCE", "binance")
 # ── Paths ─────────────────────────────────────────────────────────────────────
 WALLETS_FILE = Path(__file__).parent / "wallets.json"
 
