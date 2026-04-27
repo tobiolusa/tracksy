@@ -25,7 +25,7 @@ from pathlib import Path
 import aiohttp
 import websockets
 
-from config import HELIUS_API_KEY, BOT_TOKEN, CHAT_ID, MIN_SOL, SOL_PRICE_SOURCE
+
 
 
 HELIUS_API_KEY = os.environ["HELIUS_API_KEY"]
