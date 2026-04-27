@@ -10,6 +10,8 @@ Telegram commands:
   /add <addr> <label>      — start tracking a new wallet
   /remove <label>          — stop tracking (by label)
   /rename <old> <new>      — rename a wallet label
+  /pause                   — pause all tracking alerts
+  /resume                  — resume tracking alerts
   /status                  — tracker health & SOL price
   /help                    — show all commands
 """
@@ -70,6 +72,7 @@ sol_price_cache: dict = {"price": 150.0, "ts": 0}
 start_time: float     = time.time()
 alert_count: int      = 0
 update_offset: int    = 0
+paused: bool          = False   # ← pause flag
 _session: aiohttp.ClientSession | None = None
 
 
@@ -343,7 +346,7 @@ async def watch_all_wallets(session: aiohttp.ClientSession):
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def handle_command(session: aiohttp.ClientSession, text: str, from_chat_id: str):
-    global wallets, ws_task, alert_count
+    global wallets, ws_task, alert_count, paused
 
     parts = text.strip().split()
     if not parts:
@@ -366,6 +369,10 @@ async def handle_command(session: aiohttp.ClientSession, text: str, from_chat_id
             "✏️ /rename &lt;label&gt; &lt;newlabel&gt;\n"
             "    Rename a wallet\n"
             "    <i>e.g. /rename Lunar LunarV2</i>\n\n"
+            "⏸️ /pause\n"
+            "    Pause all tracking alerts\n\n"
+            "▶️ /resume\n"
+            "    Resume tracking alerts\n\n"
             "📊 /status\n"
             "    Tracker health + SOL price"
         )
@@ -377,10 +384,15 @@ async def handle_command(session: aiohttp.ClientSession, text: str, from_chat_id
             await send_telegram(session, "📭 No wallets being tracked.\n\nUse /add &lt;address&gt; &lt;label&gt; to add one.", from_chat_id)
             return
         ws_alive = ws_task and not ws_task.done()
-        lines = [f"👀 <b>Tracked Wallets</b> ({len(wallets)})\n"]
+        if paused:
+            status_icon = "⏸️"
+        elif ws_alive:
+            status_icon = "🟢"
+        else:
+            status_icon = "🔴"
+        lines = [f"{status_icon} <b>Tracked Wallets</b> ({len(wallets)})\n"]
         for i, (addr, label) in enumerate(wallets.items(), 1):
-            status = "🟢" if ws_alive else "🔴"
-            lines.append(f"{status} <b>{label}</b>\n<code>{addr}</code>\n")
+            lines.append(f"{status_icon} <b>{label}</b>\n<code>{addr}</code>\n")
         await send_telegram(session, "\n".join(lines), from_chat_id)
 
     # /add <address> <label>
@@ -408,11 +420,14 @@ async def handle_command(session: aiohttp.ClientSession, text: str, from_chat_id
         save_wallets()
 
         # Restart the single WebSocket so it picks up the new wallet
-        restart_watcher(session)
+        if not paused:
+            restart_watcher(session)
 
         log(f"➕ Added [{label}] {addr}")
         await send_telegram(session,
-            f"✅ <b>Now tracking: {label}</b>\n<code>{addr}</code>", from_chat_id)
+            f"✅ <b>Now tracking: {label}</b>\n<code>{addr}</code>"
+            + ("\n\n⏸️ Tracker is paused — send /resume to start receiving alerts." if paused else ""),
+            from_chat_id)
 
     # /remove <label>
     elif cmd == "remove":
@@ -435,7 +450,8 @@ async def handle_command(session: aiohttp.ClientSession, text: str, from_chat_id
         save_wallets()
 
         # Restart the single WebSocket without the removed wallet
-        restart_watcher(session)
+        if not paused:
+            restart_watcher(session)
 
         log(f"➖ Removed [{removed_label}]")
         await send_telegram(session, f"🗑️ Removed <b>{removed_label}</b> from tracking.", from_chat_id)
@@ -470,20 +486,67 @@ async def handle_command(session: aiohttp.ClientSession, text: str, from_chat_id
         wallets[addr_found] = new_label
         save_wallets()
 
-        # Restart with updated label
-        restart_watcher(session)
+        # Restart with updated label (only if not paused)
+        if not paused:
+            restart_watcher(session)
 
         log(f"✏️  Renamed [{old_name}] → [{new_label}]")
         await send_telegram(session, f"✏️ Renamed <b>{old_name}</b> → <b>{new_label}</b>", from_chat_id)
+
+    # /pause
+    elif cmd == "pause":
+        if paused:
+            await send_telegram(session,
+                "⏸️ Tracker is already paused.\n\nSend /resume to start receiving alerts again.",
+                from_chat_id)
+            return
+
+        paused = True
+
+        # Kill the WebSocket — no point staying connected
+        if ws_task and not ws_task.done():
+            ws_task.cancel()
+
+        log("⏸️  Tracking paused")
+        await send_telegram(session,
+            f"⏸️ <b>Tracking paused</b>\n\n"
+            f"No alerts will be sent for {len(wallets)} wallet(s).\n\n"
+            f"Send /resume to start receiving alerts again.",
+            from_chat_id)
+
+    # /resume
+    elif cmd == "resume":
+        if not paused:
+            await send_telegram(session,
+                "▶️ Tracker is already running.\n\nSend /pause to pause it.",
+                from_chat_id)
+            return
+
+        paused = False
+
+        # Restart the WebSocket
+        restart_watcher(session)
+
+        log("▶️  Tracking resumed")
+        await send_telegram(session,
+            f"▶️ <b>Tracking resumed</b>\n\n"
+            f"Now watching <b>{len(wallets)}</b> wallet(s) again.",
+            from_chat_id)
 
     # /status
     elif cmd == "status":
         price    = await get_sol_price(session)
         ws_alive = ws_task and not ws_task.done()
+        if paused:
+            ws_status = "⏸️ paused"
+        elif ws_alive:
+            ws_status = "🟢 connected"
+        else:
+            ws_status = "🔴 reconnecting"
         msg = (
             f"📊 <b>Tracker Status</b>\n\n"
             f"🟢 Uptime: <b>{fmt_uptime()}</b>\n"
-            f"📡 WebSocket: <b>{'🟢 connected' if ws_alive else '🔴 reconnecting'}</b>\n"
+            f"📡 WebSocket: <b>{ws_status}</b>\n"
             f"👀 Wallets: <b>{len(wallets)} tracked</b>\n"
             f"🔔 Alerts sent: <b>{alert_count}</b>\n"
             f"💰 SOL price: <b>${price:,.2f}</b>\n"
@@ -545,6 +608,10 @@ async def poll_commands(session: aiohttp.ClientSession):
 
 async def process_transaction(session: aiohttp.ClientSession, signature: str, wallet_address: str, wallet_label: str):
     global alert_count
+
+    # Drop any in-flight transactions that arrived before the socket was cancelled
+    if paused:
+        return
 
     if signature in processed_sigs:
         return
@@ -735,4 +802,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n\n👋  Tracker stopped. Goodbye!\n")
-        
